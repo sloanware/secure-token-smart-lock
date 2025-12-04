@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartLock Admin Console</title>
+    <style>
+        :root {
+            --main-lavender: #d9ccf2; 
+            --dark-lavender: #998ccc; 
+            --success-green: #1ab24d;
+            --error-red: #d93025;
+        }
+        body { font-family: 'Futura', sans-serif; background-color: var(--main-lavender); padding: 20px; display: flex; justify-content: center; }
+        .container { background: white; width: 100%; max-width: 600px; padding: 30px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        
+        h1 { color: var(--dark-lavender); text-align: center; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #666; font-size: 0.9rem; margin-bottom: 30px; }
+
+        .card { background: #f8f9fa; border: 1px solid #eee; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+        .card-title { font-weight: bold; color: var(--dark-lavender); margin-bottom: 15px; border-bottom: 2px solid var(--main-lavender); padding-bottom: 5px; }
+
+        label { display: block; margin-bottom: 5px; font-size: 0.85rem; color: #555; font-weight: bold; }
+        input, select { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
+        
+        button { width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s; color: white; background-color: var(--dark-lavender); }
+        button:hover { opacity: 0.9; transform: scale(1.02); }
+        button:active { transform: scale(0.98); }
+        
+        .btn-red { background-color: var(--error-red); }
+        .btn-green { background-color: var(--success-green); }
+
+        #console-output { background: #1e1e1e; color: #0f0; font-family: monospace; padding: 15px; border-radius: 8px; min-height: 100px; max-height: 200px; overflow-y: auto; font-size: 0.8rem; margin-top: 20px; }
+        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #333; padding-bottom: 2px; }
+        .log-err { color: #ff4444; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>SmartLock Admin</h1>
+    <p class="subtitle">Dashboard</p>
+
+    <div class="card" style="border-color: var(--dark-lavender);">
+        <label>ADMIN PASSWORD</label>
+        <input type="password" id="adminSecret" value="change_me_in_env" placeholder="Enter Secret">
+    </div>
+
+    <div class="card">
+        <div class="card-title">Server Status</div>
+        <button class="btn-green" onclick="checkStatus()">Check Health & Stats</button>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Enroll New Student</div>
+        <label>Student ID</label>
+        <input type="text" id="enrollId" placeholder="e.g. 40012345">
+        
+        <label>Enrollment Token (Secret)</label>
+        <input type="text" id="enrollToken" placeholder="e.g. STUDENT_SECRET_TOKEN">
+        
+        <label>Permissions</label>
+        <select id="enrollPerms">
+            <option value="ALL">All Rooms</option>
+            <option value="LAB_968">Lab 968 Only</option>
+            <option value="LAB_969">Lab 969 Only</option>
+        </select>
+
+        <label>Expiration Date (Optional)</label>
+        <input type="date" id="enrollExpiry">
+
+        <button onclick="enrollStudent()">Enroll Student</button>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Revoke Access</div>
+        <label>Student ID to Ban</label>
+        <input type="text" id="revokeId" placeholder="e.g. 40012345">
+        <button class="btn-red" onclick="revokeStudent()">Revoke Access Immediately</button>
+    </div>
+
+    <label>System Logs</label>
+    <div id="console-output">Ready...</div>
+</div>
+
+<script>
+    const API_URL = window.location.origin;
+
+    function log(msg, isError = false) {
+        const box = document.getElementById('console-output');
+        const time = new Date().toLocaleTimeString();
+        const line = `<div class="log-entry ${isError ? 'log-err' : ''}">[${time}] ${msg}</div>`;
+        box.innerHTML = line + box.innerHTML;
+    }
+
+    async function checkStatus() {
+        const secret = document.getElementById('adminSecret').value;
+        try {
+            const res = await fetch(`${API_URL}/server-status?adminSecret=${secret}`);
+            const data = await res.json();
+            if(res.ok) log(`Status: ${data.enrollmentCount} students enrolled, ${data.activeShortTokens.length} active sessions.`);
+            else log(`Error: ${data.error}`, true);
+        } catch (e) { log(`Connection Failed`, true); }
+    }
+
+    async function enrollStudent() {
+        const secret = document.getElementById('adminSecret').value;
+        const expiryDate = document.getElementById('enrollExpiry').value;
+        
+        const body = {
+            studentId: document.getElementById('enrollId').value,
+            enrollmentToken: document.getElementById('enrollToken').value,
+            permissions: document.getElementById('enrollPerms').value,
+            adminSecret: secret
+        };
+
+        // NEW: Convert date picker string to Timestamp (milliseconds)
+        if (expiryDate) {
+            // Create date at midnight UTC or Local depending on browser, 
+            // adding 'T23:59:59' ensures it expires at the END of that day.
+            const timestamp = new Date(expiryDate + 'T23:59:59').getTime();
+            body.expiresAt = timestamp;
+        }
+
+        if(!body.studentId || !body.enrollmentToken) return log("Missing fields", true);
+
+        try {
+            const res = await fetch(`${API_URL}/enroll`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if(res.ok) log(`Success: Student ${body.studentId} enrolled.`);
+            else log(`Error: ${data.error}`, true);
+        } catch (e) { log(`Connection Failed`, true); }
+    }
+
+    async function revokeStudent() {
+        const secret = document.getElementById('adminSecret').value;
+        const id = document.getElementById('revokeId').value;
+
+        if(!id) return log("Missing Student ID", true);
+
+        try {
+            const res = await fetch(`${API_URL}/revoke-enrollment`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ studentId: id, adminSecret: secret })
+            });
+            const data = await res.json();
+            if(res.ok) log(`REVOKED: Student ${id} access removed.`);
+            else log(`Error: ${data.error}`, true);
+        } catch (e) { log(`Connection Failed`, true); }
+    }
+</script>
+
+</body>
+</html>

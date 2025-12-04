@@ -1,0 +1,15 @@
+node_modules/
+.vscode
+
+.env
+secrets.h
+secrets.swift
+
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+*.app
+
+.DS_Store
+Thumbs.db
