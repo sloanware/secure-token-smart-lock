@@ -36,6 +36,10 @@ Keep note that this is a prototype, and in a real-world production setting, furt
 
 Also, power outtage, server down or network delay would need to be considered. Two possible offline solutions are a TTGO token cache or public-private key pair fallback.
 
+### Demo
+
+https://github.com/user-attachments/assets/4c45149e-8033-49e4-b839-19d3c7a52a7f
+
 ### Functional Diagram
 
 ![Functional Diagram SmartLock](https://github.com/user-attachments/assets/2a94a667-25d9-4d43-b570-281875e4db85)
