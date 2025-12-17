@@ -38,7 +38,7 @@ Also, power outtage, server down or network delay would need to be considered. T
 
 ### Demo
 
-https://github.com/user-attachments/assets/4c45149e-8033-49e4-b839-19d3c7a52a7f
+https://github.com/user-attachments/assets/a44900ed-36ff-4c1f-b8e1-7c0a34f33dd7
 
 ### Functional Diagram
 
