@@ -9,7 +9,8 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <NimBLEDevice.h>
+#include <WebServer.h> 
+#include <ESPmDNS.h>   
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -22,31 +23,31 @@ const char* WIFI_PASS = WIFI_PASS;
 const String SERVER_URL = SERVER_URL;
 const String DOOR_ID = DOOR_ID; 
 
-// --- PINS ---
+// PINS
 #define PIN_SERVO 12
 #define PIN_BUZZER 13
-#define PIN_LIDAR_RX 25
-#define PIN_LIDAR_TX -1 
+#define PIN_LIDAR_RX 32 
+#define PIN_LIDAR_TX -1 // Unused
 
-// OLED Pins
-#define OLED_SDA 21
-#define OLED_SCL 22
-#define OLED_RST 16
+// OLED
+#define OLED_SDA 21 
+#define OLED_SCL 22 
+#define OLED_RST 16 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-// --- OBJECTS ---
+// OBJECTS
 Servo myservo;
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
-NimBLEScan* pBLEScan;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST); 
+WebServer server(80); 
 
-// --- STATE ---
-bool isScanning = true;
-String foundToken = "";
-int foundRSSI = 0;
+// STATE
+int lastRSSI = 0;
 
-// Forward Declaration
+// Declarations
 int getRobustLidarDistance();
+void handleUnlockRequest();
+void handleNotFound();
 
 void setup() {
   Serial.begin(115200);
@@ -56,275 +57,222 @@ void setup() {
 
   // Init Components
   myservo.attach(PIN_SERVO);
-  myservo.write(0); // Start Locked
-  
+  myservo.write(0); 
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
 
-  // Init Display (Hardware Reset for TTGO)
+  // Init Display
   pinMode(OLED_RST, OUTPUT);
   digitalWrite(OLED_RST, LOW); delay(20);
   digitalWrite(OLED_RST, HIGH); delay(20);
 
-  Wire.begin(OLED_SDA, OLED_SCL);
+  Wire.begin(OLED_SDA, OLED_SCL); 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
     Serial.println("SSD1306 allocation failed");
   }
-  display.setRotation(2); // Rotates 180 degrees
+  display.setRotation(2); 
   display.setTextColor(WHITE);
   
   // Show Boot
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0,0);
-  display.println("System Booting...");
+  display.println("Booting Wi-Fi...");
   display.display();
 
-  // Connect to WiFi
+  // CONNECT TO WI-FI
+  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  
+  Serial.print("Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi Connected");
+  Serial.println("\nConnected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 
-  // Init BLE
-  NimBLEDevice::init("");
-  pBLEScan = NimBLEDevice::getScan();
-  pBLEScan->setActiveScan(true);
-  pBLEScan->setInterval(100);
-  pBLEScan->setWindow(99);
+  if (MDNS.begin("smartlock")) {
+    Serial.println("mDNS responder started");
+  }
+
+  // Local server for receiving access requests from phone app
+  server.on("/unlock", HTTP_POST, handleUnlockRequest);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  
+  showIdleScreen();
 }
 
 void loop() {
-  if (isScanning) {
-    showIdleScreen(); 
-    
-    // 1. Start scan (1 second)
-    pBLEScan->start(1, false); 
-    
-    // 2. Get results
-    NimBLEScanResults foundDevices = pBLEScan->getResults(); 
-    
-    for(int i=0; i<foundDevices.getCount(); i++) {
-      const NimBLEAdvertisedDevice* device = foundDevices.getDevice(i);
-      String name = device->getName().c_str();
-      
-      // Look for our specific token length (18 chars)
-      if (name.length() == 18) {
-        Serial.print("Found Token: ");
-        Serial.println(name);
-        
-        foundToken = name;
-        foundRSSI = device->getRSSI();
-        
-        isScanning = false; 
-        pBLEScan->stop();
-        break; 
-      }
-    }
-    pBLEScan->clearResults(); 
-  } 
-  else {
-    processAccessRequest();
-    
-    // Cooldown before scanning again
-    delay(2000);
-    isScanning = true;
+  server.handleClient();
+}
+
+// API HANDLER
+void handleUnlockRequest() {
+  if (!server.hasArg("plain")) { 
+    server.send(400, "text/plain", "Body missing");
+    return;
   }
-}
 
-// Displays big "968"
-void showIdleScreen() {
-  display.invertDisplay(false); // Ensure normal colors
-  display.clearDisplay();
+  String body = server.arg("plain");
+  Serial.println("Received Request: " + body);
   
-  // Room Number
-  display.setTextSize(4);      
-  display.setTextColor(WHITE);
-  display.setCursor(28, 10);   
-  display.println("968");
+  StaticJsonDocument<200> docIn;
+  deserializeJson(docIn, body);
+  String token = docIn["token"];
   
-  // Status in Corner (Small)
-  display.setTextSize(1);
-  display.setCursor(85, 55); // Bottom Right
-  display.println("LOCKED");
-  
-  display.display();
-}
+  if (token.length() != 18) {
+      server.send(400, "application/json", "{\"error\":\"Invalid token format\"}");
+      return;
+  }
 
-void processAccessRequest() {
-  // --- ROBUST LIDAR READ ---
+  // Gather Sensor Data
+  Serial.println("Reading Sensors...");
   int distance = getRobustLidarDistance();
+  Serial.print("LiDAR Result: "); Serial.println(distance);
+  
+  lastRSSI = WiFi.RSSI(); 
   
   display.clearDisplay();
   display.setCursor(0,0);
   display.setTextSize(1);
-  display.println("Verifying Access...");
-  
-  display.print("RSSI: "); display.println(foundRSSI);
-  display.print("Dist: "); 
-  if(distance == 999) display.println("Error/Far");
-  else { display.print(distance); display.println(" cm"); }
-  
+  display.println("Verifying...");
+  display.print("RSSI: "); display.println(lastRSSI);
+  display.print("Dist: "); display.println(distance);
   display.display();
 
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFiClientSecure client;
-    client.setInsecure(); 
-    HTTPClient http;
-    
-    http.begin(client, SERVER_URL);
-    http.addHeader("Content-Type", "application/json");
+  // Relay to Render server
+  WiFiClientSecure client;
+  client.setInsecure(); 
+  HTTPClient http;
+  
+  http.begin(client, SERVER_URL);
+  http.addHeader("Content-Type", "application/json");
 
-    StaticJsonDocument<200> doc;
-    doc["token"] = foundToken;
-    doc["rssi"] = foundRSSI;
-    doc["distanceCm"] = distance;
-    doc["doorId"] = DOOR_ID;
-    
-    String requestBody;
-    serializeJson(doc, requestBody);
+  StaticJsonDocument<200> docOut;
+  docOut["token"] = token;
+  docOut["rssi"] = lastRSSI;
+  docOut["distanceCm"] = distance;
+  docOut["doorId"] = DOOR_ID;
+  
+  String requestBody;
+  serializeJson(docOut, requestBody);
 
-    int httpResponseCode = http.POST(requestBody);
-    
-    if (httpResponseCode > 0) {
+  int httpCode = http.POST(requestBody);
+  bool granted = false;
+  String reason = "server_error";
+
+  if (httpCode > 0) {
       String response = http.getString();
       StaticJsonDocument<200> respDoc;
       deserializeJson(respDoc, response);
       
-      bool granted = respDoc["granted"];
-      String reason = respDoc["reason"];
-
-      if (granted) {
-        performUnlock();
-      } else {
-        performDeny(reason);
-      }
-    } else {
-      showStatus("Server Error");
-      delay(2000);
-    }
-    http.end();
+      granted = respDoc["granted"];
+      if (!granted) reason = respDoc["reason"].as<String>();
   } else {
-    showStatus("WiFi Lost");
-    delay(1000);
+      Serial.print("HTTP Fail: "); Serial.println(httpCode);
   }
+  http.end();
+
+  if (granted) {
+      server.send(200, "application/json", "{\"status\":\"unlocked\"}");
+      performUnlock();
+  } else {
+      server.send(403, "application/json", "{\"status\":\"denied\",\"reason\":\"" + reason + "\"}");
+      performDeny(reason);
+  }
+  
+  showIdleScreen();
+}
+
+void handleNotFound() {
+  server.send(404, "text/plain", "Not Found");
 }
 
 void performUnlock() {
   Serial.println("ACCESS GRANTED");
-  
-  // --- VISUAL: INVERT DISPLAY (Simulates Green/Active) ---
   display.invertDisplay(true); 
   display.clearDisplay();
-  
-  // Big Status
-  display.setCursor(10, 20);
-  display.setTextSize(3);
+  display.setCursor(22, 25);
+  display.setTextSize(2);
   display.println("GRANTED");
-
-  // Small Status in Corner
   display.setTextSize(1);
   display.setCursor(75, 55); 
   display.println("UNLOCKED");
-  
   display.display();
 
-  // --- AUDIO: Happy Tones ---
   tone(PIN_BUZZER, 1000, 100); delay(100);
   tone(PIN_BUZZER, 1500, 100); delay(100);
   tone(PIN_BUZZER, 2000, 200); 
 
-  // --- ACTION: Unlock ---
   myservo.write(90); 
-
-  // --- WAIT: 5 Seconds (No Countdown) ---
   delay(5000);
-
-  // --- RESET ---
-  myservo.write(0); // Lock
-  display.invertDisplay(false); // Back to normal colors
-  tone(PIN_BUZZER, 500, 300);   // Lock tone
+  myservo.write(0); 
+  display.invertDisplay(false); 
+  tone(PIN_BUZZER, 500, 300);   
 }
 
 void performDeny(String reason) {
   Serial.println("ACCESS DENIED: " + reason);
-
-  // --- VISUAL: NORMAL DISPLAY (Simulates Red/Error) ---
   display.invertDisplay(false);
   display.clearDisplay();
-  
-  // Big Status
   display.setCursor(20, 20);
   display.setTextSize(3);
   display.println("DENIED");
-  
-  // Reason Text
   display.setTextSize(1);
   display.setCursor(5, 50);
-  if (reason == "rssi_too_weak") display.println("Move Closer");
+  
+  if (reason == "rssi_too_weak") display.println("Weak Wi-Fi Signal");
   else if (reason == "distance_too_far") display.println("LiDAR: Too Far");
   else display.println("Invalid Token");
   
-  // Status in Corner
   display.setCursor(85, 0); 
   display.println("LOCKED");
-
   display.display();
-
-  // --- AUDIO: Sad Tone ---
   tone(PIN_BUZZER, 200, 1000); 
   delay(2000); 
 }
 
-// -----------------------------------------------------------
-//  ROBUST LIDAR FUNCTION
-// -----------------------------------------------------------
+void showIdleScreen() {
+  display.invertDisplay(false); 
+  display.clearDisplay();
+  display.setTextSize(4);      
+  display.setTextColor(WHITE);
+  display.setCursor(28, 10);   
+  display.println("968");
+  display.setTextSize(1);
+  display.setCursor(25, 55); 
+  display.println("LOCKED");
+  display.display();
+}
+
 int getRobustLidarDistance() {
-  // 1. FLUSH BUFFER
-  while (Serial2.available() > 0) {
-    Serial2.read();
-  }
-
-  // 2. WAIT FOR FRESH DATA
-  delay(25);
-
-  // 3. READ A PACKET
+  // Flush buffer
+  while (Serial2.available() > 0) Serial2.read();
+  
+  // Wait for fresh data (Increased to 30ms)
+  delay(30);
+  
+  // Read Loop (Increased timeout to 200ms to handle Wi-Fi jitter)
   unsigned long start = millis();
-  while (millis() - start < 50) {
+  while (millis() - start < 200) {
     if (Serial2.available() >= 9) {
       if (Serial2.read() == 0x59) {
-        if (Serial2.peek() == 0x59) {
-          Serial2.read(); // Consume 2nd header
-          
-          int distL = Serial2.read();
-          int distH = Serial2.read();
-          int strL  = Serial2.read();
-          int strH  = Serial2.read();
-          int tempL = Serial2.read();
-          int tempH = Serial2.read();
-          int checksum = Serial2.read();
-          
-          long sum = 0x59 + 0x59 + distL + distH + strL + strH + tempL + tempH;
-          if ((sum & 0xFF) == checksum) {
-            int newDist = distL + (distH * 256);
-            if (newDist > 0 && newDist < 1200) {
-               return newDist; 
-            }
-          }
-        }
+         if (Serial2.peek() == 0x59) {
+            Serial2.read(); // Consume 2nd 0x59
+            int distL = Serial2.read();
+            int distH = Serial2.read();
+            for(int i=0; i<5; i++) Serial2.read(); // Consume remaining
+            
+            int dist = distL + (distH * 256);
+            if(dist > 0 && dist < 1200) return dist;
+         }
       }
     }
   }
-  return 999; // Return safe value (too far) on failure
-}
-
-void showStatus(String msg) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0, 0);
-  display.println(msg);
-  display.display();
+  
+  Serial.println("LiDAR TIMEOUT");
+  return 999; 
 }
